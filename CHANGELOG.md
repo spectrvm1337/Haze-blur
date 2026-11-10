@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.0
+
+Added
+- `Haze::set_regions` and `Region`, to blur parts of a window instead of all of it.
+- `Style::saturation`, animated together with the rest of the style.
+- `tauri-plugin-haze`, which drives the blur from JavaScript, and `examples/tauri`.
+- The `haze-blur` npm package for Electron, in `npm`.
+- `examples/winit.rs` and tests that run the blur on real windows.
+- `haze_set_regions` in the C interface.
+
+Changed
+- The blur stops drawing while the window is hidden or minimized.
+- `haze_attach` and `haze_set_style` take a `saturation` argument.
+- Haze also sets `DWMWA_USE_HOSTBACKDROPBRUSH`, the documented switch on Windows 11. This has not been tested on Windows 11.
+
 ## 0.2.0
 
 Added

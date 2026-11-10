@@ -7,28 +7,41 @@ use windows::core::{Interface, HSTRING};
 use windows::Graphics::Effects::{IGraphicsEffect, IGraphicsEffectSource};
 use windows::UI::Composition::Desktop::DesktopWindowTarget;
 use windows::UI::Composition::{
-    CompositionAnimation, CompositionColorBrush, CompositionEffectBrush, CompositionEffectSourceParameter,
+    CompositionBrush, CompositionColorBrush, CompositionEffectBrush, CompositionEffectSourceParameter,
     CompositionRoundedRectangleGeometry, Compositor, ContainerVisual, SpriteVisual,
 };
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
-use windows_numerics::Vector2;
+use windows_numerics::{Vector2, Vector3};
 
-use crate::effect::{GaussianBlur, AMOUNT, EFFECT_NAME};
-use crate::{Shared, Style};
+use crate::effect::{gaussian_blur, saturation, BLUR_AMOUNT, SATURATION};
+use crate::{Region, Shared, Style};
 
-/// The page's usual easing curve; the fade and the animated style changes run on it.
+/// The easing curve the fade and the animated style changes run on.
 const BEZIER: [f32; 4] = [0.32, 0.72, 0.0, 1.0];
+
+/// One blurred shape: the blur, and the tint lying over it.
+struct Layer {
+    blur: SpriteVisual,
+    tint: SpriteVisual,
+    blur_shape: CompositionRoundedRectangleGeometry,
+    tint_shape: CompositionRoundedRectangleGeometry,
+    /// `None` fills the window.
+    region: Option<Region>,
+}
+
+impl Layer {
+    fn shapes(&self) -> [&CompositionRoundedRectangleGeometry; 2] {
+        [&self.blur_shape, &self.tint_shape]
+    }
+}
 
 pub(crate) struct Engine {
     // Fields drop in the order they are declared: the visuals first, the compositor after them, and
     // the dispatcher queue they all run on last of all.
+    layers: Vec<Layer>,
     root: ContainerVisual,
-    blur_layer: SpriteVisual,
-    tint_layer: SpriteVisual,
-    blur_shape: CompositionRoundedRectangleGeometry,
-    tint_shape: CompositionRoundedRectangleGeometry,
     brush: CompositionEffectBrush,
     tint_brush: CompositionColorBrush,
     _target: DesktopWindowTarget,
@@ -37,20 +50,24 @@ pub(crate) struct Engine {
     hwnd: HWND,
     pub(crate) shared: Arc<Shared>,
     style: Style,
+    regions: Vec<Region>,
     size: (f32, f32),
     scale: f32,
 }
 
 impl Engine {
     pub(crate) fn new(hwnd: HWND, style: Style, shared: Arc<Shared>) -> windows::core::Result<Engine> {
-        use windows_collections::IIterable;
         use windows::Win32::System::WinRT::Composition::ICompositorDesktopInterop;
         use windows::Win32::System::WinRT::{
             CreateDispatcherQueueController, DispatcherQueueOptions, DQTAT_COM_NONE, DQTYPE_THREAD_CURRENT,
         };
+        use windows_collections::IIterable;
 
         // Lets the brush see what is behind the window.
-        unsafe { set_accent(hwnd, ACCENT_ENABLE_HOSTBACKDROP) };
+        unsafe {
+            set_accent(hwnd, ACCENT_ENABLE_HOSTBACKDROP);
+            set_host_backdrop(hwnd, true);
+        }
         // From here on, a failure has to put the accent back.
         let undo = Undo(hwnd);
 
@@ -72,33 +89,24 @@ impl Engine {
         target.SetRoot(&root)?;
 
         // The blur: the system's blurred backdrop, blurred some more by an amount that can be animated.
-        let backdrop: windows::UI::Composition::CompositionBrush = compositor.CreateHostBackdropBrush()?.cast()?;
+        let backdrop: CompositionBrush = compositor.CreateHostBackdropBrush()?.cast()?;
         let source: IGraphicsEffectSource =
             CompositionEffectSourceParameter::Create(&HSTRING::from("backdrop"))?.cast()?;
-        let effect: IGraphicsEffect = GaussianBlur { amount: style.strength, source }.into();
-        let animated: IIterable<HSTRING> = vec![HSTRING::from(prop_name())].into();
+        let saturated: IGraphicsEffectSource = saturation(style.saturation, source).cast()?;
+        let effect: IGraphicsEffect = gaussian_blur(style.strength, saturated);
+        let animated: IIterable<HSTRING> = vec![HSTRING::from(BLUR_AMOUNT), HSTRING::from(SATURATION)].into();
         let brush = compositor.CreateEffectFactoryWithProperties(&effect, &animated)?.CreateBrush()?;
         brush.SetSourceParameter(&HSTRING::from("backdrop"), &backdrop)?;
-        brush.Properties()?.InsertScalar(&HSTRING::from(prop_name()), style.strength)?;
+        let properties = brush.Properties()?;
+        properties.InsertScalar(&HSTRING::from(BLUR_AMOUNT), style.strength)?;
+        properties.InsertScalar(&HSTRING::from(SATURATION), style.saturation)?;
 
-        let (blur_layer, blur_shape) = layer(&compositor, &brush.cast::<windows::UI::Composition::CompositionBrush>()?)?;
-
-        // The dark layer over it: always black-ish with an opacity, so that the opacity can be animated.
         let tint_brush = compositor.CreateColorBrushWithColor(color_of(style.tint_color))?;
-        let (tint_layer, tint_shape) = layer(&compositor, &tint_brush.cast::<windows::UI::Composition::CompositionBrush>()?)?;
-        tint_layer.SetOpacity(style.tint.clamp(0.0, 1.0))?;
-
-        let kids = root.Children()?;
-        kids.InsertAtTop(&blur_layer)?;
-        kids.InsertAtTop(&tint_layer)?;
 
         std::mem::forget(undo);
         let mut engine = Engine {
+            layers: Vec::new(),
             root,
-            blur_layer,
-            tint_layer,
-            blur_shape,
-            tint_shape,
             brush,
             tint_brush,
             _target: target,
@@ -107,74 +115,140 @@ impl Engine {
             hwnd,
             shared,
             style,
+            regions: Vec::new(),
             size: (0.0, 0.0),
             scale: 1.0,
         };
-        engine.refresh_size()?;
+        engine.read_size()?;
+        engine.rebuild()?;
         Ok(engine)
     }
 
-    /// Reads the window's client size and DPI scale, and fits the layers to them.
-    pub(crate) fn refresh_size(&mut self) -> windows::core::Result<()> {
+    fn make_layer(&self, region: Option<Region>) -> windows::core::Result<Layer> {
+        let (blur, blur_shape) = sprite(&self.compositor, &self.brush.cast()?)?;
+        let (tint, tint_shape) = sprite(&self.compositor, &self.tint_brush.cast()?)?;
+        tint.SetOpacity(self.style.tint.clamp(0.0, 1.0))?;
+        Ok(Layer { blur, tint, blur_shape, tint_shape, region })
+    }
+
+    /// Makes one layer per region, or a single one that fills the window if there are no regions.
+    fn rebuild(&mut self) -> windows::core::Result<()> {
+        let kids = self.root.Children()?;
+        kids.RemoveAll()?;
+        let wanted: Vec<Option<Region>> =
+            if self.regions.is_empty() { vec![None] } else { self.regions.iter().copied().map(Some).collect() };
+        let mut layers = Vec::with_capacity(wanted.len());
+        for region in wanted {
+            let layer = self.make_layer(region)?;
+            kids.InsertAtTop(&layer.blur)?;
+            kids.InsertAtTop(&layer.tint)?;
+            layers.push(layer);
+        }
+        self.layers = layers;
+        self.place()
+    }
+
+    pub(crate) fn set_regions(&mut self, regions: Vec<Region>) -> windows::core::Result<()> {
+        self.regions = regions;
+        self.rebuild()
+    }
+
+    fn read_size(&mut self) -> windows::core::Result<bool> {
         let mut r = Default::default();
         unsafe { GetClientRect(self.hwnd, &mut r)? };
         let (w, h) = ((r.right - r.left) as f32, (r.bottom - r.top) as f32);
         let dpi = unsafe { GetDpiForWindow(self.hwnd) };
         self.scale = if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 };
         if w <= 0.0 || h <= 0.0 {
-            return Ok(()); // minimized
+            return Ok(false); // minimized
         }
         self.size = (w, h);
-        let size = Vector2 { X: w, Y: h };
-        self.root.SetSize(size)?;
-        for (layer, shape) in [(&self.blur_layer, &self.blur_shape), (&self.tint_layer, &self.tint_shape)] {
-            layer.SetSize(size)?;
-            shape.SetSize(size)?;
-        }
-        self.set_radius_now()
+        Ok(true)
     }
 
-    fn set_radius_now(&self) -> windows::core::Result<()> {
-        let r = self.style.radius * self.scale;
-        for shape in [&self.blur_shape, &self.tint_shape] {
-            shape.SetCornerRadius(Vector2 { X: r, Y: r })?;
+    /// Reads the window's client size and DPI scale, and fits the layers to them.
+    pub(crate) fn refresh_size(&mut self) -> windows::core::Result<()> {
+        if self.read_size()? {
+            self.place()?;
         }
         Ok(())
+    }
+
+    /// Puts every layer where it belongs for the current size, scale and style.
+    fn place(&self) -> windows::core::Result<()> {
+        let (cw, ch) = self.size;
+        self.root.SetSize(Vector2 { X: cw, Y: ch })?;
+        for l in &self.layers {
+            let (x, y, w, h) = match l.region {
+                Some(r) => (r.x * self.scale, r.y * self.scale, r.width * self.scale, r.height * self.scale),
+                None => (0.0, 0.0, cw, ch),
+            };
+            let (offset, size) = (Vector3 { X: x, Y: y, Z: 0.0 }, Vector2 { X: w, Y: h });
+            for visual in [&l.blur, &l.tint] {
+                visual.SetOffset(offset)?;
+                visual.SetSize(size)?;
+            }
+            let r = self.radius_of(l);
+            for shape in l.shapes() {
+                shape.SetSize(size)?;
+                shape.SetCornerRadius(Vector2 { X: r, Y: r })?;
+            }
+        }
+        Ok(())
+    }
+
+    /// A layer's corner radius in pixels: its region's own, or the style's.
+    fn radius_of(&self, l: &Layer) -> f32 {
+        l.region.and_then(|r| r.radius).unwrap_or(self.style.radius) * self.scale
     }
 
     /// Moves to `style` over `duration` (at once if it is zero). The animations run in the compositor,
     /// not in the app, so nothing is called per frame.
     pub(crate) fn set_style(&mut self, style: Style, duration: Duration) -> windows::core::Result<()> {
-        use windows_numerics::Vector2;
         self.style = style;
-        let strength_prop = HSTRING::from(prop_name());
-        let radius = style.radius * self.scale;
+        let strength_prop = HSTRING::from(BLUR_AMOUNT);
+        let saturation_prop = HSTRING::from(SATURATION);
+        let (corner, opacity, color) = (HSTRING::from("CornerRadius"), HSTRING::from("Opacity"), HSTRING::from("Color"));
         let tint = style.tint.clamp(0.0, 1.0);
 
         // Whatever was running is replaced by the new target.
-        for shape in [&self.blur_shape, &self.tint_shape] {
-            shape.StopAnimation(&HSTRING::from("CornerRadius"))?;
+        for l in &self.layers {
+            for shape in l.shapes() {
+                shape.StopAnimation(&corner)?;
+            }
+            l.tint.StopAnimation(&opacity)?;
         }
         self.brush.StopAnimation(&strength_prop)?;
-        self.tint_layer.StopAnimation(&HSTRING::from("Opacity"))?;
-        self.tint_brush.StopAnimation(&HSTRING::from("Color"))?;
+        self.brush.StopAnimation(&saturation_prop)?;
+        self.tint_brush.StopAnimation(&color)?;
 
         if duration.is_zero() {
-            self.set_radius_now()?;
-            self.brush.Properties()?.InsertScalar(&strength_prop, style.strength)?;
-            self.tint_layer.SetOpacity(tint)?;
-            return self.tint_brush.SetColor(color_of(style.tint_color));
+            let properties = self.brush.Properties()?;
+            properties.InsertScalar(&strength_prop, style.strength)?;
+            properties.InsertScalar(&saturation_prop, style.saturation)?;
+            self.tint_brush.SetColor(color_of(style.tint_color))?;
+            for l in &self.layers {
+                l.tint.SetOpacity(tint)?;
+            }
+            return self.place();
         }
 
         let c = &self.compositor;
         let dur = timespan(duration);
         let ease = easing(c)?;
 
-        let a = c.CreateVector2KeyFrameAnimation()?;
-        a.InsertKeyFrameWithEasingFunction(1.0, Vector2 { X: radius, Y: radius }, &ease)?;
-        a.SetDuration(dur)?;
-        for shape in [&self.blur_shape, &self.tint_shape] {
-            shape.StartAnimation(&HSTRING::from("CornerRadius"), &a.cast::<CompositionAnimation>()?)?;
+        for l in &self.layers {
+            let r = self.radius_of(l);
+            let a = c.CreateVector2KeyFrameAnimation()?;
+            a.InsertKeyFrameWithEasingFunction(1.0, Vector2 { X: r, Y: r }, &ease)?;
+            a.SetDuration(dur)?;
+            for shape in l.shapes() {
+                shape.StartAnimation(&corner, &a)?;
+            }
+            let a = c.CreateScalarKeyFrameAnimation()?;
+            a.InsertKeyFrameWithEasingFunction(1.0, tint, &ease)?;
+            a.SetDuration(dur)?;
+            l.tint.StartAnimation(&opacity, &a)?;
         }
 
         let a = c.CreateScalarKeyFrameAnimation()?;
@@ -183,14 +257,14 @@ impl Engine {
         self.brush.StartAnimation(&strength_prop, &a)?;
 
         let a = c.CreateScalarKeyFrameAnimation()?;
-        a.InsertKeyFrameWithEasingFunction(1.0, tint, &ease)?;
+        a.InsertKeyFrameWithEasingFunction(1.0, style.saturation, &ease)?;
         a.SetDuration(dur)?;
-        self.tint_layer.StartAnimation(&HSTRING::from("Opacity"), &a)?;
+        self.brush.StartAnimation(&saturation_prop, &a)?;
 
         let a = c.CreateColorKeyFrameAnimation()?;
         a.InsertKeyFrameWithEasingFunction(1.0, color_of(style.tint_color), &ease)?;
         a.SetDuration(dur)?;
-        self.tint_brush.StartAnimation(&HSTRING::from("Color"), &a)
+        self.tint_brush.StartAnimation(&color, &a)
     }
 
     /// Fades the whole blur in or out.
@@ -206,11 +280,19 @@ impl Engine {
         a.SetDuration(timespan(duration))?;
         self.root.StartAnimation(&name, &a)
     }
+
+    /// Stops drawing while the window cannot be seen.
+    pub(crate) fn set_visible(&self, visible: bool) -> windows::core::Result<()> {
+        self.root.SetIsVisible(visible)
+    }
 }
 
 impl Drop for Engine {
     fn drop(&mut self) {
-        unsafe { set_accent(self.hwnd, ACCENT_DISABLED) };
+        unsafe {
+            set_accent(self.hwnd, ACCENT_DISABLED);
+            set_host_backdrop(self.hwnd, false);
+        }
     }
 }
 
@@ -218,12 +300,11 @@ impl Drop for Engine {
 struct Undo(HWND);
 impl Drop for Undo {
     fn drop(&mut self) {
-        unsafe { set_accent(self.0, ACCENT_DISABLED) };
+        unsafe {
+            set_accent(self.0, ACCENT_DISABLED);
+            set_host_backdrop(self.0, false);
+        }
     }
-}
-
-fn prop_name() -> String {
-    format!("{EFFECT_NAME}.{AMOUNT}")
 }
 
 fn color_of(rgb: [u8; 3]) -> windows::UI::Color {
@@ -240,16 +321,21 @@ fn easing(c: &Compositor) -> windows::core::Result<windows::UI::Composition::Cub
     c.CreateCubicBezierEasingFunction(Vector2 { X: x1, Y: y1 }, Vector2 { X: x2, Y: y2 })
 }
 
-/// One layer: a sprite painted with `brush`, cut to a rounded rectangle whose size is set later.
-fn layer(
-    c: &Compositor,
-    brush: &windows::UI::Composition::CompositionBrush,
-) -> windows::core::Result<(SpriteVisual, CompositionRoundedRectangleGeometry)> {
+/// A sprite painted with `brush`, cut to a rounded rectangle whose size is set later.
+fn sprite(c: &Compositor, brush: &CompositionBrush) -> windows::core::Result<(SpriteVisual, CompositionRoundedRectangleGeometry)> {
     let sprite = c.CreateSpriteVisual()?;
     sprite.SetBrush(brush)?;
     let shape = c.CreateRoundedRectangleGeometry()?;
     sprite.SetClip(&c.CreateGeometricClipWithGeometry(&shape)?)?;
     Ok((sprite, shape))
+}
+
+/// Windows 11's documented switch for the host backdrop brush. Windows 10 does not know the
+/// attribute and refuses it, which is fine: the accent does the job there.
+unsafe fn set_host_backdrop(hwnd: HWND, on: bool) {
+    use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_USE_HOSTBACKDROPBRUSH};
+    let value = on as i32; // a Win32 BOOL
+    let _ = DwmSetWindowAttribute(hwnd, DWMWA_USE_HOSTBACKDROPBRUSH, &value as *const _ as *const c_void, std::mem::size_of::<i32>() as u32);
 }
 
 // ---- accent -----------------------------------------------------------------------------------

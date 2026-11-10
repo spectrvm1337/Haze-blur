@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-set-regions"
+description = "Enables the set_regions command without any pre-configured scope."
+commands.allow = ["set_regions"]
+
+[[permission]]
+identifier = "deny-set-regions"
+description = "Denies the set_regions command without any pre-configured scope."
+commands.deny = ["set_regions"]

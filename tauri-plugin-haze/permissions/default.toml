@@ -1,0 +1,10 @@
+[default]
+description = "Allows every Haze command."
+permissions = [
+    "allow-attach",
+    "allow-set-style",
+    "allow-animate-to",
+    "allow-fade",
+    "allow-set-regions",
+    "allow-detach",
+]

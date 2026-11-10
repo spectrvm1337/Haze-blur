@@ -1,0 +1,25 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; height: 100%; background: transparent; color: #fff; font: 16px sans-serif; }
+  main { height: 100%; display: flex; align-items: center; justify-content: center; gap: 8px; }
+</style>
+</head>
+<body>
+<main data-tauri-drag-region>
+  <button id="dark">Dark</button>
+  <button id="frost">Frost</button>
+  <button id="close">Close</button>
+</main>
+<script>
+const { invoke } = window.__TAURI__.core;
+invoke('plugin:haze|attach', { style: { preset: 'dark', radius: 32 } });
+const go = (preset, radius) => invoke('plugin:haze|animate_to', { style: { preset, radius }, ms: 400 });
+document.getElementById('dark').onclick = () => go('dark', 32);
+document.getElementById('frost').onclick = () => go('frost', 64);
+document.getElementById('close').onclick = () => window.close();
+</script>
+</body>
+</html>

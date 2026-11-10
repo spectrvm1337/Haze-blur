@@ -1,2 +1,10 @@
 /target
 Cargo.lock
+npm/bin/
+npm/node_modules/
+npm/package-lock.json
+tauri-plugin-haze/target/
+tauri-plugin-haze/Cargo.lock
+examples/tauri/src-tauri/target/
+examples/tauri/src-tauri/Cargo.lock
+examples/tauri/src-tauri/gen/

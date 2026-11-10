@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-fade"
+description = "Enables the fade command without any pre-configured scope."
+commands.allow = ["fade"]
+
+[[permission]]
+identifier = "deny-fade"
+description = "Denies the fade command without any pre-configured scope."
+commands.deny = ["fade"]

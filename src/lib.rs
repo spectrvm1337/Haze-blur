@@ -42,7 +42,7 @@ use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::WindowsAndMessaging::{
     CallWindowProcW, GetPropW, GetWindowLongPtrW, GetWindowThreadProcessId, IsWindow, PostMessageW, RemovePropW,
-    SetPropW, SetWindowLongPtrW, GWLP_WNDPROC, WM_APP, WM_DESTROY, WM_DPICHANGED, WM_NCDESTROY, WM_SIZE,
+    SetPropW, SetWindowLongPtrW, GWLP_WNDPROC, WM_APP, WM_DESTROY, WM_DPICHANGED, WM_NCDESTROY, WM_SHOWWINDOW, WM_SIZE,
 };
 
 pub use windows::core::{Error, Result};
@@ -63,27 +63,30 @@ pub struct Style {
     pub tint: f32,
     /// The tint's colour, RGB.
     pub tint_color: [u8; 3],
+    /// Colour saturation of what shows through: 0 is grey, 1 leaves the colours alone, above 1
+    /// strengthens them.
+    pub saturation: f32,
 }
 
 impl Default for Style {
     /// Plain blur, no tint.
     fn default() -> Self {
-        Style { radius: 20.0, strength: 10.0, tint: 0.0, tint_color: [0, 0, 0] }
+        Style { radius: 20.0, strength: 10.0, tint: 0.0, tint_color: [0, 0, 0], saturation: 1.0 }
     }
 }
 
 impl Style {
     /// Dark glass: a graphite tint, easy to read light text on.
     pub fn dark() -> Style {
-        Style { radius: 20.0, strength: 14.0, tint: 0.45, tint_color: [10, 10, 14] }
+        Style { radius: 20.0, strength: 14.0, tint: 0.45, tint_color: [10, 10, 14], saturation: 1.0 }
     }
     /// Light glass.
     pub fn light() -> Style {
-        Style { radius: 20.0, strength: 14.0, tint: 0.4, tint_color: [244, 245, 250] }
+        Style { radius: 20.0, strength: 14.0, tint: 0.4, tint_color: [244, 245, 250], saturation: 1.0 }
     }
     /// Frosted: a strong blur with only a trace of white.
     pub fn frost() -> Style {
-        Style { radius: 20.0, strength: 24.0, tint: 0.16, tint_color: [255, 255, 255] }
+        Style { radius: 20.0, strength: 24.0, tint: 0.16, tint_color: [255, 255, 255], saturation: 1.25 }
     }
     /// Corner radius in CSS px.
     pub fn radius(mut self, radius: f32) -> Style {
@@ -105,11 +108,41 @@ impl Style {
         self.tint_color = rgb;
         self
     }
+    /// Colour saturation of what shows through; 1 leaves it alone.
+    pub fn saturation(mut self, saturation: f32) -> Style {
+        self.saturation = saturation.max(0.0);
+        self
+    }
+}
+
+/// A part of the window to blur, in CSS px from the client area's top-left corner.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct Region {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    /// This region's own corner radius, instead of the style's. It is not animated by
+    /// [`Haze::animate_to`].
+    pub radius: Option<f32>,
+}
+
+impl Region {
+    pub fn new(x: f32, y: f32, width: f32, height: f32) -> Region {
+        Region { x, y, width, height, radius: None }
+    }
+    /// Gives this region its own corner radius. Half of its height makes a pill.
+    pub fn radius(mut self, radius: f32) -> Region {
+        self.radius = Some(radius.max(0.0));
+        self
+    }
 }
 
 enum Cmd {
     Style(Style, Duration),
     Fade(bool, Duration),
+    Regions(Vec<Region>),
     Detach,
 }
 
@@ -209,6 +242,12 @@ impl Haze {
         self.send(Cmd::Fade(visible, duration));
     }
 
+    /// Blurs only these parts of the window, for example a sidebar and a card. An empty list goes
+    /// back to the whole window. The regions stay where they are when the window is resized.
+    pub fn set_regions(&self, regions: &[Region]) {
+        self.send(Cmd::Regions(regions.to_vec()));
+    }
+
     /// Takes the blur off the window. It also goes by itself when the window is destroyed.
     pub fn detach(&self) {
         self.send(Cmd::Detach);
@@ -253,6 +292,7 @@ unsafe fn run_queue(hwnd: HWND, slot: *mut Slot) {
         let _ = match cmd {
             Cmd::Style(s, d) => engine.set_style(s, d),
             Cmd::Fade(v, d) => engine.fade(v, d),
+            Cmd::Regions(r) => engine.set_regions(r),
             Cmd::Detach => {
                 release(hwnd, slot);
                 return;
@@ -280,9 +320,18 @@ unsafe extern "system" fn subclass_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
     let prev: windows::Win32::UI::WindowsAndMessaging::WNDPROC = std::mem::transmute((*slot).prev);
 
     match msg {
-        WM_SIZE if wp.0 != SIZE_MINIMIZED => {
+        WM_SIZE => {
             if let Some(e) = (*slot).engine.as_mut() {
-                let _ = e.refresh_size();
+                let minimized = wp.0 == SIZE_MINIMIZED;
+                let _ = e.set_visible(!minimized);
+                if !minimized {
+                    let _ = e.refresh_size();
+                }
+            }
+        }
+        WM_SHOWWINDOW => {
+            if let Some(e) = (*slot).engine.as_ref() {
+                let _ = e.set_visible(wp.0 != 0);
             }
         }
         WM_DPICHANGED => {
