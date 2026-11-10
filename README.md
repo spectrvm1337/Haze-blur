@@ -1,8 +1,8 @@
 # Haze
 
-Rounded backdrop blur for Windows 10 windows, in Rust.
-
 ![A Haze window gliding over an animated wallpaper and changing its radius, blur strength and tint](assets/demo.gif)
+
+Rounded backdrop blur for Windows 10 windows, in Rust.
 
 Windows 10 blurs only whole rectangles behind a window. Put a rounded card in a transparent window and the blur shows square corners around it. Haze draws the blur itself with `Windows.UI.Composition`, so it takes the card's shape. The radius, the strength and the tint can be changed at any time, and the compositor animates the change.
 
