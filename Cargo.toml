@@ -1,6 +1,6 @@
 [package]
 name = "haze"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.75"
 description = "Rounded-corner backdrop blur for Windows 10 windows (HostBackdropBrush + geometric clip)"
@@ -8,6 +8,7 @@ authors = ["spectrvm1337"]
 license = "MIT"
 repository = "https://github.com/spectrvm1337/Haze-blur"
 readme = "README.md"
+exclude = ["assets/", "target/"]
 keywords = ["windows", "blur", "acrylic", "rounded", "tauri"]
 categories = ["os::windows-apis", "gui"]
 
@@ -15,21 +16,39 @@ categories = ["os::windows-apis", "gui"]
 default-target = "x86_64-pc-windows-msvc"
 targets = ["x86_64-pc-windows-msvc"]
 
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[features]
+default = ["raw-window-handle"]
+# C interface (haze.dll) for C#, Python, Electron addons and the like.
+ffi = []
+
+[dependencies]
+raw-window-handle = { version = "0.6", optional = true }
+
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = [
     "Foundation",
+    "Foundation_Collections",
+    "Foundation_Metadata",
     "Graphics_Effects",
     "System",
+    "UI",
     "UI_Composition",
     "UI_Composition_Desktop",
     "Win32_Foundation",
     "Win32_Graphics_Direct2D",
     "Win32_Graphics_Direct2D_Common",
     "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
     "Win32_System_WinRT",
     "Win32_System_WinRT_Composition",
     "Win32_System_WinRT_Graphics_Direct2D",
+    "Win32_UI_HiDpi",
+    "Win32_UI_WindowsAndMessaging",
 ] }
+windows-collections = "0.2"
 windows-core = "0.61"
 windows-numerics = "0.2"
 

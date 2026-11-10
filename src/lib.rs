@@ -3,292 +3,311 @@
 //! Windows 10 can only blur a whole rectangle behind a window (the acrylic and blur accents), so a
 //! transparent window with a rounded card in it gets a blur with square corners sticking out. Haze
 //! draws the blur itself with `Windows.UI.Composition`: one sprite painted with the `HostBackdropBrush`
-//! (what is behind the window), a Gaussian blur on top of the system's own, and a rounded-rectangle
-//! clip that gives the blur its shape. It sits under the window's content, so a transparent webview
-//! or a layered child window draws over it.
+//! (what is behind the window), a Gaussian blur on top of the system's own, a dark layer over it, and
+//! a rounded-rectangle clip that gives them their shape. They sit under the window's content, so a
+//! transparent webview or a layered child window draws over them.
 //!
 //! ```no_run
-//! # fn demo(hwnd: *mut std::ffi::c_void) -> windows::core::Result<()> {
+//! # fn demo(window: &impl raw_window_handle::HasWindowHandle) -> windows::core::Result<()> {
 //! use std::time::Duration;
 //! use haze::{Haze, Style};
 //!
-//! // On the thread that owns the window.
-//! let haze = Haze::new(hwnd, Style { radius: 20.0, strength: 10.0 })?;
-//! haze.resize(480.0, 700.0, 1.25);               // client size in pixels, and the DPI scale
-//! haze.fade(false, Duration::from_millis(200));  // fade the blur out with your own fade
+//! // On the thread that owns the window. After this the blur follows the window's size and DPI by itself.
+//! let haze = Haze::attach(window, Style::dark().radius(20.0))?;
+//!
+//! // From any thread, later. Changes are animated by the compositor, nothing is called per frame.
+//! haze.animate_to(Style::light().radius(32.0), Duration::from_millis(300));
+//! haze.fade(false, Duration::from_millis(200)); // fade it with your own fade
 //! # Ok(()) }
 //! ```
 //!
-//! Dropping the [`Haze`] removes the blur.
+//! The blur belongs to the window: it goes away with it, or on [`Haze::detach`]. The handle can be
+//! cloned and sent to other threads.
 //!
 //! It uses `SetWindowCompositionAttribute`, which is undocumented, to let the brush see behind the
 //! window (accent state 5, `ACCENT_ENABLE_HOSTBACKDROP`).
 #![cfg(windows)]
 
-use std::cell::Cell;
+mod effect;
+mod engine;
+#[cfg(feature = "ffi")]
+pub mod ffi;
+
 use std::ffi::c_void;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use windows::core::{implement, Interface, HSTRING};
-use windows::Graphics::Effects::{IGraphicsEffect, IGraphicsEffect_Impl, IGraphicsEffectSource, IGraphicsEffectSource_Impl};
-use windows::UI::Composition::Desktop::DesktopWindowTarget;
-use windows::UI::Composition::{CompositionBrush, CompositionEffectSourceParameter, Compositor, ContainerVisual};
-use windows::Win32::Foundation::HWND;
-use windows::Win32::System::WinRT::Graphics::Direct2D::{
-    IGraphicsEffectD2D1Interop, IGraphicsEffectD2D1Interop_Impl, GRAPHICS_EFFECT_PROPERTY_MAPPING,
+use windows::core::{w, HSTRING, PCWSTR};
+use windows::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::System::Threading::GetCurrentThreadId;
+use windows::Win32::UI::WindowsAndMessaging::{
+    CallWindowProcW, GetPropW, GetWindowLongPtrW, GetWindowThreadProcessId, IsWindow, PostMessageW, RemovePropW,
+    SetPropW, SetWindowLongPtrW, GWLP_WNDPROC, WM_APP, WM_DESTROY, WM_DPICHANGED, WM_NCDESTROY, WM_SIZE,
 };
 
 pub use windows::core::{Error, Result};
 
-/// How the blur looks.
+use engine::Engine;
+
+/// How the blur looks. Build one from a preset and change what you need:
+/// `Style::dark().radius(24.0).strength(18.0)`.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct Style {
-    /// Corner radius in device-independent pixels (CSS px). [`Haze::resize`] scales it.
+    /// Corner radius in device-independent pixels (CSS px); it is scaled by the window's DPI.
     pub radius: f32,
     /// Extra Gaussian blur on top of the system's own, in px.
     pub strength: f32,
+    /// How much of the tint colour is laid over the blur, 0.0 (none) to 1.0 (solid). A blur over a
+    /// light or busy backdrop is hard to see; tinting it makes the shape stand out.
+    pub tint: f32,
+    /// The tint's colour, RGB.
+    pub tint_color: [u8; 3],
 }
 
 impl Default for Style {
+    /// Plain blur, no tint.
     fn default() -> Self {
-        Style { radius: 20.0, strength: 10.0 }
+        Style { radius: 20.0, strength: 10.0, tint: 0.0, tint_color: [0, 0, 0] }
     }
 }
 
-/// A rounded blur under one window. Not `Send`: it belongs to the thread that created it.
+impl Style {
+    /// Dark glass: a graphite tint, easy to read light text on.
+    pub fn dark() -> Style {
+        Style { radius: 20.0, strength: 14.0, tint: 0.45, tint_color: [10, 10, 14] }
+    }
+    /// Light glass.
+    pub fn light() -> Style {
+        Style { radius: 20.0, strength: 14.0, tint: 0.4, tint_color: [244, 245, 250] }
+    }
+    /// Frosted: a strong blur with only a trace of white.
+    pub fn frost() -> Style {
+        Style { radius: 20.0, strength: 24.0, tint: 0.16, tint_color: [255, 255, 255] }
+    }
+    /// Corner radius in CSS px.
+    pub fn radius(mut self, radius: f32) -> Style {
+        self.radius = radius.max(0.0);
+        self
+    }
+    /// Blur strength in px.
+    pub fn strength(mut self, strength: f32) -> Style {
+        self.strength = strength.max(0.0);
+        self
+    }
+    /// Tint opacity, 0.0 to 1.0.
+    pub fn tint(mut self, tint: f32) -> Style {
+        self.tint = tint.clamp(0.0, 1.0);
+        self
+    }
+    /// Tint colour.
+    pub fn tint_color(mut self, rgb: [u8; 3]) -> Style {
+        self.tint_color = rgb;
+        self
+    }
+}
+
+enum Cmd {
+    Style(Style, Duration),
+    Fade(bool, Duration),
+    Detach,
+}
+
+/// What the handles and the window's engine share.
+pub(crate) struct Shared {
+    queue: Mutex<Vec<Cmd>>,
+    style: Mutex<Style>,
+}
+
+/// A rounded blur under one window. Cheap to clone and safe to send to other threads; the
+/// calls are carried out on the window's own thread.
+#[derive(Clone)]
 pub struct Haze {
-    // Fields drop in the order they are declared: the visuals first, the compositor after them, and
-    // the dispatcher queue they all run on last of all.
-    root: ContainerVisual,
-    _target: DesktopWindowTarget,
-    compositor: Compositor,
-    brush: CompositionBrush,
-    _queue: Option<windows::System::DispatcherQueueController>,
-    hwnd: HWND,
-    style: Style,
-    size: Cell<(f32, f32, f32)>,
+    hwnd: isize,
+    shared: Arc<Shared>,
+}
+
+const WM_HAZE: u32 = WM_APP + 0x4A5;
+/// The window property that holds the [`Slot`].
+const PROP: PCWSTR = w!("HazeSlot");
+
+/// What is kept on the window: the procedure it had, and the engine. The engine is gone after a
+/// detach; the slot stays if somebody else replaced the procedure after us and it cannot be undone.
+struct Slot {
+    prev: isize,
+    engine: Option<Engine>,
 }
 
 impl Haze {
-    /// Starts the blur on `hwnd`, a raw `HWND` (`window.hwnd()` in Tauri, `RawWindowHandle` in winit).
-    /// The window has to be transparent, or have no background of its own, for the blur to show.
-    /// Call it on the thread that owns the window. Nothing is drawn until the first [`resize`](Self::resize).
-    pub fn new(hwnd: *mut c_void, style: Style) -> Result<Haze> {
-        use windows::Win32::System::WinRT::Composition::ICompositorDesktopInterop;
-        use windows::Win32::System::WinRT::{
-            CreateDispatcherQueueController, DispatcherQueueOptions, DQTAT_COM_NONE, DQTYPE_THREAD_CURRENT,
-        };
+    /// Whether this Windows has what the blur needs (Windows 10 1803 or newer).
+    pub fn supported() -> bool {
+        windows::Foundation::Metadata::ApiInformation::IsMethodPresent(
+            &HSTRING::from("Windows.UI.Composition.Compositor"),
+            &HSTRING::from("CreateHostBackdropBrush"),
+        )
+        .unwrap_or(false)
+    }
 
+    /// Puts the blur under `window` (a Tauri window, a winit window, anything with a window handle).
+    /// Call it on the thread that owns the window, and make the window transparent so that the blur
+    /// shows. The blur follows the window's size and DPI from then on.
+    #[cfg(feature = "raw-window-handle")]
+    pub fn attach(window: &impl raw_window_handle::HasWindowHandle, style: Style) -> Result<Haze> {
+        use raw_window_handle::RawWindowHandle;
+        match window.window_handle().map(|h| h.as_raw()) {
+            Ok(RawWindowHandle::Win32(h)) => Haze::attach_hwnd(h.hwnd.get() as *mut c_void, style),
+            _ => Err(Error::new(windows::Win32::Foundation::E_INVALIDARG, "not a Win32 window")),
+        }
+    }
+
+    /// Like [`attach`](Self::attach), from a raw `HWND`.
+    pub fn attach_hwnd(hwnd: *mut c_void, style: Style) -> Result<Haze> {
+        use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, RPC_E_WRONG_THREAD};
         let hwnd = HWND(hwnd);
-        // Lets the brush see what is behind the window.
-        unsafe { set_accent(hwnd, ACCENT_ENABLE_HOSTBACKDROP) };
-
-        // A compositor needs a dispatcher queue on its thread; if the thread already has one, that one does.
-        let queue = unsafe {
-            CreateDispatcherQueueController(DispatcherQueueOptions {
-                dwSize: std::mem::size_of::<DispatcherQueueOptions>() as u32,
-                threadType: DQTYPE_THREAD_CURRENT,
-                apartmentType: DQTAT_COM_NONE,
-            })
+        if !on_window_thread(hwnd) {
+            return Err(Error::new(RPC_E_WRONG_THREAD, "attach has to run on the window's thread"));
         }
-        .ok();
-
-        let built = (|| {
-            let compositor = Compositor::new()?;
-            let interop: ICompositorDesktopInterop = compositor.cast()?;
-            // Not topmost: the sprite goes under the window's content, which is drawn over it.
-            let target = unsafe { interop.CreateDesktopWindowTarget(hwnd, false)? };
-            let root = compositor.CreateContainerVisual()?;
-            target.SetRoot(&root)?;
-            let brush = make_brush(&compositor, style.strength)?;
-            Ok(Haze { root, _target: target, compositor, brush, _queue: queue, hwnd, style, size: Cell::new((0.0, 0.0, 1.0)) })
-        })();
-        if built.is_err() {
-            unsafe { set_accent(hwnd, ACCENT_DISABLED) };
+        if unsafe { slot_of(hwnd) }.is_some() {
+            return Err(ERROR_ALREADY_EXISTS.to_hresult().into());
         }
-        built
+
+        let shared = Arc::new(Shared { queue: Mutex::new(Vec::new()), style: Mutex::new(style) });
+        let engine = Engine::new(hwnd, style, shared.clone())?;
+
+        // The window procedure is replaced by hand: SetWindowSubclass would need comctl32 v6, which an
+        // exe only gets with a manifest, and a library cannot add one to the program that uses it.
+        let slot = Box::into_raw(Box::new(Slot { prev: 0, engine: Some(engine) }));
+        unsafe {
+            if let Err(e) = SetPropW(hwnd, PROP, Some(HANDLE(slot as *mut c_void))) {
+                drop(Box::from_raw(slot));
+                return Err(e);
+            }
+            (*slot).prev = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, subclass_proc as *const () as usize as isize);
+        }
+        Ok(Haze { hwnd: hwnd.0 as isize, shared })
     }
 
-    /// The current style.
+    /// The style that was asked for last.
     pub fn style(&self) -> Style {
-        self.style
+        *self.shared.style.lock().unwrap()
     }
 
-    /// Changes the corner radius and the strength, and redraws.
-    pub fn set_style(&mut self, style: Style) -> Result<()> {
-        if style.strength != self.style.strength {
-            self.brush = make_brush(&self.compositor, style.strength)?;
-        }
-        self.style = style;
-        let (w, h, scale) = self.size.get();
-        if w > 0.0 && h > 0.0 {
-            self.resize(w, h, scale)?;
-        }
-        Ok(())
+    /// Moves to `style` at once.
+    pub fn set_style(&self, style: Style) {
+        self.send(Cmd::Style(style, Duration::ZERO));
     }
 
-    /// Redraws the blur to the window's client size in pixels. `scale` is the DPI scale (1.25 at
-    /// 120 DPI); it turns [`Style::radius`] into pixels. Call it whenever the window is resized or
-    /// moved to a monitor with another scale.
-    pub fn resize(&self, width: f32, height: f32, scale: f32) -> Result<()> {
-        use windows_numerics::Vector2;
-        self.size.set((width, height, scale));
-        let radius = self.style.radius * scale;
-
-        let kids = self.root.Children()?;
-        kids.RemoveAll()?;
-        let sprite = self.compositor.CreateSpriteVisual()?;
-        sprite.SetBrush(&self.brush)?;
-        sprite.SetSize(Vector2 { X: width, Y: height })?;
-        let shape = self.compositor.CreateRoundedRectangleGeometry()?;
-        shape.SetSize(Vector2 { X: width, Y: height })?;
-        shape.SetCornerRadius(Vector2 { X: radius, Y: radius })?;
-        sprite.SetClip(&self.compositor.CreateGeometricClipWithGeometry(&shape)?)?;
-        kids.InsertAtTop(&sprite)
+    /// Moves to `style` over `duration`, on the page's usual curve `cubic-bezier(0.32, 0.72, 0, 1)`.
+    /// The radius, the strength, the tint and its colour all move together.
+    pub fn animate_to(&self, style: Style, duration: Duration) {
+        self.send(Cmd::Style(style, duration));
     }
 
     /// Fades the blur in or out over `duration`, or at once if it is zero. A page that fades its own
-    /// content leaves the blur at full strength unless it is faded with it. The curve is
-    /// `cubic-bezier(0.32, 0.72, 0, 1)`; [`fade_with`](Self::fade_with) takes another.
-    pub fn fade(&self, visible: bool, duration: Duration) -> Result<()> {
-        self.fade_with(visible, duration, [0.32, 0.72, 0.0, 1.0])
+    /// content leaves the blur at full strength unless it is faded with it.
+    pub fn fade(&self, visible: bool, duration: Duration) {
+        self.send(Cmd::Fade(visible, duration));
     }
 
-    /// Like [`fade`](Self::fade), on a CSS-style cubic bezier `[x1, y1, x2, y2]`.
-    pub fn fade_with(&self, visible: bool, duration: Duration, bezier: [f32; 4]) -> Result<()> {
-        use windows_numerics::Vector2;
-        let to = if visible { 1.0 } else { 0.0 };
-        let name = HSTRING::from("Opacity");
-        self.root.StopAnimation(&name)?;
-        if duration.is_zero() {
-            return self.root.SetOpacity(to);
+    /// Takes the blur off the window. It also goes by itself when the window is destroyed.
+    pub fn detach(&self) {
+        self.send(Cmd::Detach);
+    }
+
+    fn send(&self, cmd: Cmd) {
+        if let Cmd::Style(s, _) = &cmd {
+            *self.shared.style.lock().unwrap() = *s;
         }
-        let c = &self.compositor;
-        let [x1, y1, x2, y2] = bezier;
-        let anim = c.CreateScalarKeyFrameAnimation()?;
-        let ease = c.CreateCubicBezierEasingFunction(Vector2 { X: x1, Y: y1 }, Vector2 { X: x2, Y: y2 })?;
-        anim.InsertKeyFrameWithEasingFunction(1.0, to, &ease)?;
-        let ticks = duration.min(Duration::from_secs(5)).as_nanos() / 100; // 100 ns units
-        anim.SetDuration(windows::Foundation::TimeSpan { Duration: ticks as i64 })?;
-        self.root.StartAnimation(&name, &anim)
+        self.shared.queue.lock().unwrap().push(cmd);
+        let hwnd = HWND(self.hwnd as *mut c_void);
+        unsafe {
+            if !IsWindow(Some(hwnd)).as_bool() {
+                return;
+            }
+            if on_window_thread(hwnd) {
+                // Already where the engine lives: no need to wait for the message loop.
+                if let Some(slot) = slot_of(hwnd) {
+                    run_queue(hwnd, slot);
+                }
+            } else {
+                let _ = PostMessageW(Some(hwnd), WM_HAZE, WPARAM(0), LPARAM(0));
+            }
+        }
     }
 }
 
-impl Drop for Haze {
-    fn drop(&mut self) {
-        unsafe { set_accent(self.hwnd, ACCENT_DISABLED) };
+fn on_window_thread(hwnd: HWND) -> bool {
+    unsafe { GetWindowThreadProcessId(hwnd, None) == GetCurrentThreadId() }
+}
+
+unsafe fn slot_of(hwnd: HWND) -> Option<*mut Slot> {
+    let p = GetPropW(hwnd, PROP).0 as *mut Slot;
+    (!p.is_null()).then_some(p)
+}
+
+/// Carries out what was asked, on the window's thread.
+unsafe fn run_queue(hwnd: HWND, slot: *mut Slot) {
+    let Some(engine) = (*slot).engine.as_mut() else { return };
+    let cmds = std::mem::take(&mut *engine.shared.queue.lock().unwrap());
+    for cmd in cmds {
+        let _ = match cmd {
+            Cmd::Style(s, d) => engine.set_style(s, d),
+            Cmd::Fade(v, d) => engine.fade(v, d),
+            Cmd::Detach => {
+                release(hwnd, slot);
+                return;
+            }
+        };
     }
 }
 
-// ---- accent -----------------------------------------------------------------------------------
-
-const ACCENT_DISABLED: u32 = 0;
-const ACCENT_ENABLE_HOSTBACKDROP: u32 = 5;
-const WCA_ACCENT_POLICY: u32 = 19;
-
-#[repr(C)]
-struct AccentPolicy {
-    state: u32,
-    flags: u32,
-    gradient: u32,
-    animation: u32,
+/// Drops the engine, and puts the window's procedure back if nobody has replaced ours since.
+unsafe fn release(hwnd: HWND, slot: *mut Slot) {
+    (*slot).engine = None;
+    let ours = subclass_proc as *const () as usize as isize;
+    if GetWindowLongPtrW(hwnd, GWLP_WNDPROC) == ours {
+        SetWindowLongPtrW(hwnd, GWLP_WNDPROC, (*slot).prev);
+        let _ = RemovePropW(hwnd, PROP);
+        drop(Box::from_raw(slot));
+    }
 }
 
-#[repr(C)]
-struct CompositionAttribData {
-    attrib: u32,
-    data: *mut c_void,
-    size: usize,
-}
-
-type SetWindowCompositionAttribute = unsafe extern "system" fn(HWND, *mut CompositionAttribData) -> i32;
-
-/// `SetWindowCompositionAttribute` is undocumented, so it is looked up rather than linked.
-unsafe fn set_accent(hwnd: HWND, state: u32) {
-    use windows::core::s;
-    use windows::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
-    let Ok(user32) = GetModuleHandleA(s!("user32.dll")) else { return };
-    let Some(f) = GetProcAddress(user32, s!("SetWindowCompositionAttribute")) else { return };
-    let f: SetWindowCompositionAttribute = std::mem::transmute(f);
-    let mut policy = AccentPolicy { state, flags: 2, gradient: 0x0100_0000, animation: 0 };
-    let mut data = CompositionAttribData {
-        attrib: WCA_ACCENT_POLICY,
-        data: &mut policy as *mut _ as *mut c_void,
-        size: std::mem::size_of::<AccentPolicy>(),
+unsafe extern "system" fn subclass_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    const SIZE_MINIMIZED: usize = 1;
+    let Some(slot) = slot_of(hwnd) else {
+        return windows::Win32::UI::WindowsAndMessaging::DefWindowProcW(hwnd, msg, wp, lp);
     };
-    f(hwnd, &mut data);
-}
+    let prev: windows::Win32::UI::WindowsAndMessaging::WNDPROC = std::mem::transmute((*slot).prev);
 
-// ---- the brush --------------------------------------------------------------------------------
-
-/// The system's blurred backdrop, blurred `strength` px more.
-fn make_brush(c: &Compositor, strength: f32) -> Result<CompositionBrush> {
-    let backdrop: CompositionBrush = c.CreateHostBackdropBrush()?.cast()?;
-    let source: IGraphicsEffectSource = CompositionEffectSourceParameter::Create(&HSTRING::from("backdrop"))?.cast()?;
-    let effect: IGraphicsEffect = GaussianBlur { amount: strength, source }.into();
-    let brush = c.CreateEffectFactory(&effect)?.CreateBrush()?;
-    brush.SetSourceParameter(&HSTRING::from("backdrop"), &backdrop)?;
-    brush.cast()
-}
-
-// ---- the Gaussian blur effect -----------------------------------------------------------------
-// Composition takes effects as IGraphicsEffect objects that describe a Direct2D effect (what Win2D
-// provides in C#, and Win2D does not run in desktop apps). Only the one effect is needed, so it is
-// described here.
-
-/// CLSID_D2D1GaussianBlur.
-const D2D1_GAUSSIAN_BLUR: windows::core::GUID = windows::core::GUID::from_u128(0x1feb6d69_2fe6_4ac9_8c58_1d7f93e7a6a5);
-/// D2D1_BORDER_MODE_HARD: the edges are not blurred into transparency.
-const BORDER_MODE_HARD: u32 = 1;
-/// D2D1_GAUSSIANBLUR_OPTIMIZATION_BALANCED.
-const OPTIMIZATION_BALANCED: u32 = 1;
-
-#[implement(IGraphicsEffect, IGraphicsEffectSource, IGraphicsEffectD2D1Interop)]
-struct GaussianBlur {
-    amount: f32,
-    source: IGraphicsEffectSource,
-}
-
-impl IGraphicsEffect_Impl for GaussianBlur_Impl {
-    fn Name(&self) -> Result<HSTRING> {
-        Ok(HSTRING::from("blur"))
-    }
-    fn SetName(&self, _name: &HSTRING) -> Result<()> {
-        Ok(())
-    }
-}
-
-impl IGraphicsEffectSource_Impl for GaussianBlur_Impl {}
-
-impl IGraphicsEffectD2D1Interop_Impl for GaussianBlur_Impl {
-    fn GetEffectId(&self) -> Result<windows::core::GUID> {
-        Ok(D2D1_GAUSSIAN_BLUR)
-    }
-    // No property is animated, so none is looked up by name.
-    fn GetNamedPropertyMapping(&self, _: &windows::core::PCWSTR, _: *mut u32, _: *mut GRAPHICS_EFFECT_PROPERTY_MAPPING) -> Result<()> {
-        Err(windows::Win32::Foundation::E_INVALIDARG.into())
-    }
-    fn GetPropertyCount(&self) -> Result<u32> {
-        Ok(3)
-    }
-    // In D2D1_GAUSSIANBLUR_PROP order: standard deviation, optimization, border mode.
-    fn GetProperty(&self, index: u32) -> Result<windows::Foundation::IPropertyValue> {
-        use windows::Foundation::PropertyValue;
-        match index {
-            0 => PropertyValue::CreateSingle(self.amount)?.cast(),
-            1 => PropertyValue::CreateUInt32(OPTIMIZATION_BALANCED)?.cast(),
-            2 => PropertyValue::CreateUInt32(BORDER_MODE_HARD)?.cast(),
-            _ => Err(windows::Win32::Foundation::E_INVALIDARG.into()),
+    match msg {
+        WM_SIZE if wp.0 != SIZE_MINIMIZED => {
+            if let Some(e) = (*slot).engine.as_mut() {
+                let _ = e.refresh_size();
+            }
         }
-    }
-    fn GetSource(&self, index: u32) -> Result<IGraphicsEffectSource> {
-        if index == 0 {
-            Ok(self.source.clone())
-        } else {
-            Err(windows::Win32::Foundation::E_INVALIDARG.into())
+        WM_DPICHANGED => {
+            if let Some(e) = (*slot).engine.as_mut() {
+                let _ = e.refresh_size();
+            }
         }
+        WM_HAZE => {
+            run_queue(hwnd, slot);
+            return LRESULT(0);
+        }
+        WM_DESTROY => {
+            // The compositor has to be let go while the window is still whole: tearing it down in
+            // WM_NCDESTROY, when the window is already half gone, crashed the process.
+            (*slot).engine = None;
+        }
+        WM_NCDESTROY => {
+            // The window is gone: the slot goes with it, after the old procedure has run.
+            let _ = RemovePropW(hwnd, PROP);
+            (*slot).engine = None;
+            let r = CallWindowProcW(prev, hwnd, msg, wp, lp);
+            drop(Box::from_raw(slot));
+            return r;
+        }
+        _ => {}
     }
-    fn GetSourceCount(&self) -> Result<u32> {
-        Ok(1)
-    }
+    CallWindowProcW(prev, hwnd, msg, wp, lp)
 }
