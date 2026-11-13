@@ -319,6 +319,18 @@
           "markdownDescription": "Denies the attach command without any pre-configured scope."
         },
         {
+          "description": "Enables the cover_window command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-cover-window",
+          "markdownDescription": "Enables the cover_window command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the cover_window command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-cover-window",
+          "markdownDescription": "Denies the cover_window command without any pre-configured scope."
+        },
+        {
           "description": "Enables the detach command without any pre-configured scope.",
           "type": "string",
           "const": "allow-detach",
@@ -355,6 +367,18 @@
           "markdownDescription": "Denies the set_regions command without any pre-configured scope."
         },
         {
+          "description": "Enables the set_scale command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-scale",
+          "markdownDescription": "Enables the set_scale command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_scale command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-scale",
+          "markdownDescription": "Denies the set_scale command without any pre-configured scope."
+        },
+        {
           "description": "Enables the set_style command without any pre-configured scope.",
           "type": "string",
           "const": "allow-set-style",
@@ -367,10 +391,22 @@
           "markdownDescription": "Denies the set_style command without any pre-configured scope."
         },
         {
-          "description": "Allows every Haze command.\n#### This default permission set includes:\n\n- `allow-attach`\n- `allow-set-style`\n- `allow-animate-to`\n- `allow-fade`\n- `allow-set-regions`\n- `allow-detach`",
+          "description": "Enables the supported command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-supported",
+          "markdownDescription": "Enables the supported command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the supported command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-supported",
+          "markdownDescription": "Denies the supported command without any pre-configured scope."
+        },
+        {
+          "description": "Allows every Haze command.\n#### This default permission set includes:\n\n- `allow-attach`\n- `allow-set-style`\n- `allow-animate-to`\n- `allow-fade`\n- `allow-set-regions`\n- `allow-cover-window`\n- `allow-set-scale`\n- `allow-detach`\n- `allow-supported`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "Allows every Haze command.\n#### This default permission set includes:\n\n- `allow-attach`\n- `allow-set-style`\n- `allow-animate-to`\n- `allow-fade`\n- `allow-set-regions`\n- `allow-detach`"
+          "markdownDescription": "Allows every Haze command.\n#### This default permission set includes:\n\n- `allow-attach`\n- `allow-set-style`\n- `allow-animate-to`\n- `allow-fade`\n- `allow-set-regions`\n- `allow-cover-window`\n- `allow-set-scale`\n- `allow-detach`\n- `allow-supported`"
         }
       ]
     }

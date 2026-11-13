@@ -1,6 +1,6 @@
 {
   "name": "haze-blur",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Rounded backdrop blur for Electron windows on Windows 10",
   "main": "index.js",
   "types": "index.d.ts",
@@ -19,7 +19,8 @@
     "bin/x64/haze.dll"
   ],
   "scripts": {
-    "build": "cargo build --release --features ffi --manifest-path ../Cargo.toml && node -e \"const fs=require('fs');fs.mkdirSync('bin/x64',{recursive:true});fs.copyFileSync('../target/release/haze.dll','bin/x64/haze.dll')\""
+    "build": "cargo build --release -p haze --features ffi --manifest-path ../Cargo.toml && node -e \"const fs=require('fs');fs.mkdirSync('bin/x64',{recursive:true});fs.copyFileSync('../target/release/haze.dll','bin/x64/haze.dll')\"",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "koffi": "^2.9.0"

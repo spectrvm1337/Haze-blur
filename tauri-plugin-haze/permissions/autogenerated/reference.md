@@ -9,7 +9,10 @@ Allows every Haze command.
 - `allow-animate-to`
 - `allow-fade`
 - `allow-set-regions`
+- `allow-cover-window`
+- `allow-set-scale`
 - `allow-detach`
+- `allow-supported`
 
 ## Permission Table
 
@@ -68,6 +71,32 @@ Enables the attach command without any pre-configured scope.
 <td>
 
 Denies the attach command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`haze:allow-cover-window`
+
+</td>
+<td>
+
+Enables the cover_window command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`haze:deny-cover-window`
+
+</td>
+<td>
+
+Denies the cover_window command without any pre-configured scope.
 
 </td>
 </tr>
@@ -153,6 +182,32 @@ Denies the set_regions command without any pre-configured scope.
 <tr>
 <td>
 
+`haze:allow-set-scale`
+
+</td>
+<td>
+
+Enables the set_scale command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`haze:deny-set-scale`
+
+</td>
+<td>
+
+Denies the set_scale command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `haze:allow-set-style`
 
 </td>
@@ -172,6 +227,32 @@ Enables the set_style command without any pre-configured scope.
 <td>
 
 Denies the set_style command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`haze:allow-supported`
+
+</td>
+<td>
+
+Enables the supported command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`haze:deny-supported`
+
+</td>
+<td>
+
+Denies the supported command without any pre-configured scope.
 
 </td>
 </tr>

@@ -6,5 +6,8 @@ permissions = [
     "allow-animate-to",
     "allow-fade",
     "allow-set-regions",
+    "allow-cover-window",
+    "allow-set-scale",
     "allow-detach",
+    "allow-supported",
 ]

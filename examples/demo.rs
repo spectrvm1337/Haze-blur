@@ -1,11 +1,12 @@
 //! A bare Win32 window with nothing in it but the blur, which changes style on its own every couple
 //! of seconds (the compositor does the in-between frames; the app only says where to go next).
-//! Drag it by the body, Space fades the blur out and in, `D` switches between dark and light, Esc closes.
+//! Drag it by the body, Space fades the blur out and in, `D` switches between dark and light, `S`
+//! between round and squircle corners, Esc closes.
 //! `--static` stops the changes, `--seconds 3` closes the window by itself after 3 s.
 use std::cell::{Cell, RefCell};
 use std::time::Duration;
 
-use haze::{Haze, Style};
+use haze::{Corner, Haze, Style};
 use windows::core::w;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::HBRUSH;
@@ -17,6 +18,7 @@ thread_local! {
     static HAZE: RefCell<Option<Haze>> = const { RefCell::new(None) };
     static SHOWN: Cell<bool> = const { Cell::new(true) };
     static LIGHT: Cell<bool> = const { Cell::new(false) };
+    static SQUIRCLE: Cell<bool> = const { Cell::new(false) };
     static STEP: Cell<usize> = const { Cell::new(0) };
 }
 
@@ -28,7 +30,8 @@ const EVERY_MS: u32 = 2400;
 const STEPS: [(f32, f32, f32); 4] = [(70.0, 22.0, 0.55), (10.0, 8.0, 0.35), (44.0, 28.0, 0.5), (96.0, 14.0, 0.62)];
 
 fn base() -> Style {
-    if LIGHT.get() { Style::light() } else { Style::dark() }
+    let style = if LIGHT.get() { Style::light() } else { Style::dark() };
+    style.corner(if SQUIRCLE.get() { Corner::Squircle } else { Corner::Round })
 }
 
 fn next_style() {
@@ -60,6 +63,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             HAZE.with(|h| h.borrow().as_ref().map(|h| h.animate_to(base(), Duration::from_millis(500))));
             LRESULT(0)
         }
+        WM_KEYDOWN if wp.0 == 'S' as usize => {
+            SQUIRCLE.set(!SQUIRCLE.get());
+            HAZE.with(|h| h.borrow().as_ref().map(|h| h.set_style(h.style().corner(base().corner))));
+            LRESULT(0)
+        }
         WM_TIMER if wp.0 == TIMER_NEXT => {
             next_style();
             LRESULT(0)
@@ -81,7 +89,7 @@ fn main() -> windows::core::Result<()> {
     let seconds: Option<u32> = args.iter().position(|a| a == "--seconds").and_then(|i| args.get(i + 1)).and_then(|s| s.parse().ok());
 
     if !Haze::supported() {
-        eprintln!("this Windows has no HostBackdropBrush (Windows 10 1803 or newer is needed)");
+        eprintln!("this Windows cannot show the blur (Windows 10 1809 or newer is needed)");
         return Ok(());
     }
 
@@ -117,7 +125,7 @@ fn main() -> windows::core::Result<()> {
         // One line. The blur follows the window's size and DPI from here on.
         let haze = Haze::attach_hwnd(hwnd.0, Style::dark().radius(40.0).strength(16.0))?;
         HAZE.with(|h| *h.borrow_mut() = Some(haze));
-        println!("haze is up; Space fades it, D switches dark and light, Esc closes");
+        println!("haze is up; Space fades it, D switches dark and light, S round and squircle, Esc closes");
 
         if let Some(s) = seconds {
             SetTimer(Some(hwnd), TIMER_CLOSE, s * 1000, None);

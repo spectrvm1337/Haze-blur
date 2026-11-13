@@ -11,14 +11,25 @@
 <main data-tauri-drag-region>
   <button id="dark">Dark</button>
   <button id="frost">Frost</button>
+  <button id="corner">Squircle</button>
   <button id="close">Close</button>
 </main>
 <script>
 const { invoke } = window.__TAURI__.core;
-invoke('plugin:haze|attach', { style: { preset: 'dark', radius: 32 } });
-const go = (preset, radius) => invoke('plugin:haze|animate_to', { style: { preset, radius }, ms: 400 });
-document.getElementById('dark').onclick = () => go('dark', 32);
-document.getElementById('frost').onclick = () => go('frost', 64);
+const haze = (command, args) => invoke(`plugin:haze|${command}`, args);
+let style = { preset: 'dark', radius: 32, corner: 'round' };
+haze('attach', { style });
+const go = (change) => {
+  style = { ...style, ...change };
+  return haze('animate_to', { style, ms: 400 });
+};
+document.getElementById('dark').onclick = () => go({ preset: 'dark', radius: 32 });
+document.getElementById('frost').onclick = () => go({ preset: 'frost', radius: 64 });
+document.getElementById('corner').onclick = (e) => {
+  const squircle = style.corner === 'round';
+  e.target.textContent = squircle ? 'Round' : 'Squircle';
+  go({ corner: squircle ? 'squircle' : 'round' });
+};
 document.getElementById('close').onclick = () => window.close();
 </script>
 </body>

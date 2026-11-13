@@ -70,12 +70,8 @@ impl ApplicationHandler for App {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let close_after = args
-        .iter()
-        .position(|a| a == "--seconds")
-        .and_then(|i| args.get(i + 1))
-        .and_then(|s| s.parse().ok())
-        .map(Duration::from_secs);
+    let close_after =
+        args.iter().position(|a| a == "--seconds").and_then(|i| args.get(i + 1)).and_then(|s| s.parse().ok()).map(Duration::from_secs);
     let now = Instant::now();
     let mut app = App { window: None, haze: None, started: now, last_change: now, light: false, close_after };
     EventLoop::new().expect("event loop").run_app(&mut app).expect("run");

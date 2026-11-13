@@ -1,0 +1,17 @@
+{
+  "name": "tauri-plugin-haze-api",
+  "version": "0.2.0",
+  "description": "JavaScript side of tauri-plugin-haze: rounded backdrop blur for Tauri 2 windows on Windows 10",
+  "type": "module",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "license": "MIT",
+  "repository": "github:spectrvm1337/Haze-blur",
+  "files": [
+    "index.js",
+    "index.d.ts"
+  ],
+  "peerDependencies": {
+    "@tauri-apps/api": "^2"
+  }
+}

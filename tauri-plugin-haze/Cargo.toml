@@ -1,17 +1,20 @@
 [package]
 name = "tauri-plugin-haze"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Rounded backdrop blur for Tauri 2 windows on Windows 10, controlled from JavaScript"
 authors = ["spectrvm1337"]
 license = "MIT"
 repository = "https://github.com/spectrvm1337/Haze-blur"
 links = "tauri-plugin-haze"
+exclude = ["guest-js/node_modules/"]
 
 [dependencies]
-haze = { version = "0.3", path = ".." }
 serde = { version = "1", features = ["derive"] }
 tauri = "2"
+
+[target.'cfg(windows)'.dependencies]
+haze = { version = "0.4", path = ".." }
 
 [build-dependencies]
 tauri-plugin = { version = "2", features = ["build"] }
